@@ -1,0 +1,12 @@
+{
+  "appId": "kr.targetlab.app",
+  "appName": "ICT INFRA CHECK",
+  "webDir": "www",
+  "backgroundColor": "#1f4e79",
+  "android": {
+    "allowMixedContent": false
+  },
+  "ios": {
+    "contentInset": "never"
+  }
+}
