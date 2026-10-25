@@ -33,7 +33,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .brandlogo{margin:0 0 8px;padding:5px 8px;background:#fff;border-radius:6px;border:1px solid var(--line);display:flex;align-items:center;justify-content:center}.brandlogo img{max-width:70%;max-height:24px;object-fit:contain;display:block}
 .brand{font-size:19px;font-weight:600;letter-spacing:.04em;margin:0 0 18px;display:flex;align-items:center;justify-content:space-between}
 .brand .bwrap{display:flex;align-items:center;gap:10px;min-width:0;cursor:pointer;border-radius:8px}.brand .bwrap:hover .bname{color:var(--navy)}
-a.brandlogo{display:flex;cursor:pointer;border-radius:6px;transition:opacity .15s}a.brandlogo:hover{opacity:.8}.brand .bmark{width:38px;height:38px;flex:none;border-radius:9px;box-shadow:0 2px 6px rgba(18,53,83,.25)}
+a.brandlogo{display:flex;cursor:pointer;border-radius:6px;transition:opacity .15s}a.brandlogo:hover{opacity:.8}@media (max-width:860px){a.brandlogo{display:flex;width:max-content;align-self:flex-start;justify-content:flex-start;margin:0 0 6px;padding:3px 7px}.brandlogo img{max-width:none;max-height:20px}}.brand .bmark{width:38px;height:38px;flex:none;border-radius:9px;box-shadow:0 2px 6px rgba(18,53,83,.25)}
 .brand .bname{display:block;font-size:17px;font-weight:800;letter-spacing:.02em;line-height:1.15;white-space:nowrap}.brand .bname b{font-weight:300;color:var(--navy);margin-left:5px}
 .brand small{display:block;font-size:10.5px;white-space:nowrap;letter-spacing:-.2px;font-weight:400;letter-spacing:0;color:var(--muted)}
 .menu-toggle{display:none;border:1px solid var(--line);background:var(--surface);border-radius:var(--r);padding:4px 10px;cursor:pointer}
@@ -430,6 +430,8 @@ function sheetsFor(id, d, prev){
   const legacy = d.sheets || {}, out = {};
   for (const eq of d.eqIds || Object.keys(legacy)){ const sk = SHK(id, eq), pv = prev && prev.sheets && prev.sheets[eq];
     if (pv) out[eq] = pv; else if (SHD[sk]){ out[eq] = shClean(clone(SHD[sk])); LAST['sheets/' + sk] = JSON.stringify(out[eq]); } else if (legacy[eq]){ out[eq] = legacy[eq]; LAST['sheets/' + sk] = JSON.stringify(out[eq]); } }
+  /* 대상설비에서 빠진 설비의 점검표는 지우지 않고 보관(다시 체크하면 입력 내용이 돌아옴) */
+  for (const sk in SHD){ if (!sk.startsWith(id + '__')) continue; const eq = sk.slice(id.length + 2); if (out[eq]) continue; const pv = prev && prev.sheets && prev.sheets[eq]; out[eq] = pv || shClean(clone(SHD[sk])); if (!pv) LAST['sheets/' + sk] = JSON.stringify(out[eq]); }
   return out;
 }
 function onInspSnap(snap){
@@ -655,20 +657,30 @@ const fmtTime = ts => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.
 const blobToDataURL = b => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(b); });
 
 
-/* 모바일 앱: 사진을 기기의 「문서/ICT_InfraCheck/현장/설비/점검항목」 폴더에도 저장 */
-async function nativeFolderSave(i, eq, k){
-  const C = window.Capacitor; if (!C || !C.isNativePlatform || !C.isNativePlatform()) return;
-  const FS = (C.Plugins && C.Plugins.Filesystem) || C.registerPlugin('Filesystem');
-  const o = S.owners[i.ownerId] || {}, f = folderOf(i, eq, k), m = mediaOf(i.sheets[eq], k);
-  const root = fsafe(`${o.name || ''}_${i.term || ''}_${i.type === 'perf' ? '성능점검' : '유지보수관리'}`).replace(/ /g, '_');
-  const dir = `ICT_InfraCheck/${root}/${f.eqF}/${f.itF}`;
-  for (let j = 0; j < m.p.length; j++){
-    const src = PH[m.p[j].id]; const mm = src && /^data:image\/(png|jpe?g|webp);base64,(.*)$/.exec(src); if (!mm) continue;
-    const path = `${dir}/${f.itF}_${pad2(j + 1)}.${mm[1] === 'jpeg' ? 'jpg' : mm[1]}`;
-    try { await FS.stat({ path, directory: 'DOCUMENTS' }); continue; } catch(e){}
-    await FS.writeFile({ path, data: mm[2], directory: 'DOCUMENTS', recursive: true });
+/* 모바일 앱: 사진을 기기의 「문서/ICT_InfraCheck/관리주체/점검/설비/점검항목」 폴더에 자동 저장 */
+const isNative = () => { const C = window.Capacitor; return !!(C && C.isNativePlatform && C.isNativePlatform()); };
+function photoRoot(i){ const o = S.owners[i.ownerId] || {}; return [fsafe(o.name || '관리주체 미지정'), fsafe([i.date, i.term, i.type === 'perf' ? '성능점검' : '유지보수관리'].filter(Boolean).join('_')).replace(/ /g, '_')]; }
+const tsName = ts => { const d = new Date(ts); return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`; };
+async function nativeWritePhotos(i, sets){
+  if (!isNative()) return 0;
+  const C = window.Capacitor, FS = (C.Plugins && C.Plugins.Filesystem) || C.registerPlugin('Filesystem');
+  if (!nativeWritePhotos.perm){ nativeWritePhotos.perm = 1; try { await FS.requestPermissions(); } catch(e){} }
+  sets.forEach(x => x.p.forEach(p => getPhoto(p.id))); await waitPhotos();
+  const [ow, ins] = photoRoot(i); let n = 0;
+  for (const x of sets){
+    const dir = `ICT_InfraCheck/${ow}/${ins}/${x.f.eqF}/${x.f.itF}`;
+    for (const p of x.p){
+      const src = PH[p.id], mm = src && /^data:image\/(png|jpe?g|webp);base64,(.*)$/.exec(src); if (!mm) continue;
+      /* 파일 이름은 촬영 시각 + 사진 고유번호라 사진을 지우거나 다른 기기에서 받아도 겹치지 않음 */
+      const path = `${dir}/${x.f.itF}_${p.ts ? tsName(p.ts) + '_' : ''}${String(p.id).slice(-5)}.${mm[1] === 'jpeg' ? 'jpg' : mm[1]}`;
+      try { await FS.stat({ path, directory: 'DOCUMENTS' }); continue; } catch(e){}
+      await FS.writeFile({ path, data: mm[2], directory: 'DOCUMENTS', recursive: true }); n++;
+    }
   }
+  return n;
 }
+const nativeFolderSave = (i, eq, k) => nativeWritePhotos(i, [{ f: folderOf(i, eq, k), p: mediaOf(i.sheets[eq], k).p }]);
+const nativeSyncInsp = (i, id) => nativeWritePhotos(i, folderTree(i, id).flatMap(t => t.items));
 async function addPhotos(files, inspId, eq, k){
   const i = S.inspections[inspId]; if (!i) return;
   const cfg = boardCfg(); let n = 0, turned = 0;
@@ -680,7 +692,7 @@ async function addPhotos(files, inspId, eq, k){
     await setPhoto(id, src);
     mediaOf(i.sheets[eq], k).p.push({ id, ts: Date.now() }); n++;
   }
-  if (n){ UI.openItem = eq + '|' + k; put('inspections', inspId, i); const f = folderOf(i, eq, k); nativeFolderSave(i, eq, k).catch(() => {}); toast(`📁 ${EQM[eq].name} › ${f.itF} 폴더에 사진 ${n}장 저장 (총 ${mediaOf(i.sheets[eq], k).p.length}장)${turned ? ` · 세로 사진 ${turned}장을 가로(4:3)로 맞춤 — 다음엔 휴대폰을 가로로 돌려 찍어 주세요` : ''}`); }
+  if (n){ UI.openItem = eq + '|' + k; put('inspections', inspId, i); const f = folderOf(i, eq, k); nativeFolderSave(i, eq, k).catch(() => {}); toast(`📁 ${isNative() ? '휴대폰 문서/ICT_InfraCheck › ' + photoRoot(i)[0] + ' › ' : ''}${EQM[eq].name} › ${f.itF} 폴더에 사진 ${n}장 저장 (총 ${mediaOf(i.sheets[eq], k).p.length}장)${turned ? ` · 세로 사진 ${turned}장을 가로(4:3)로 맞춤 — 다음엔 휴대폰을 가로로 돌려 찍어 주세요` : ''}`); }
 }
 async function storeAudio(id, src){
   const parts = []; for (let p = 0; p < src.length; p += 190000) parts.push(src.slice(p, p + 190000));
@@ -821,6 +833,49 @@ function inspTitle(i){ const o = S.owners[i.ownerId]; return `${o ? o.name : '(�
 const verdictMark = v => v === 'O' ? '○' : v === 'X' ? 'X' : v === '-' || v === '/' ? '/' : '미완';
 function durRange(s){ const m = String(s).match(/(\d+)(?:~(\d+))?/); return m ? [+m[1], +(m[2] || m[1])] : null; }
 function ownerTargets(o){ return EQ.filter(e => o && o.equip && o.equip[e.id] && o.equip[e.id].on).map(e => e.id); }
+/* 관리주체 대상설비가 바뀌면 진행 중인 점검의 설비 목록을 맞춤: 새로 체크한 설비는 점검표 추가, 체크 해제한 설비는 점검·보고서에서 빼고 입력 내용은 보관 */
+function syncInspTargets(ownerId, only){
+  const tg = ownerTargets(S.owners[ownerId]); if (!tg.length) return 0;
+  let n = 0;
+  for (const [id, i] of Object.entries(S.inspections)){
+    if (i.ownerId !== ownerId || (only ? id !== only : i.status === '완료') || !i.eqIds) continue;
+    const cur = i.eqIds.map(Number), add = tg.filter(eq => !cur.includes(eq)), drop = cur.filter(eq => !tg.includes(eq));
+    if (!add.length && !drop.length) continue;
+    const eqIds = EQ.map(e => e.id).filter(eq => (cur.includes(eq) && !drop.includes(eq)) || add.includes(eq));
+    const sheets = { ...(i.sheets || {}) }; eqIds.forEach(eq => { sheets[eq] = sheets[eq] || { items: tplItems(i.type, eq), res:{}, note:{} }; });
+    S.inspections[id] = { ...i, eqIds, sheets }; persist('inspections', id, 600); n++;
+  }
+  return n;
+}
+/* 기본설정 > 점검표의 항목을 바꾸면 진행 중인 점검의 점검표 항목도 맞춤: 같은 문구는 입력 결과를 옮기고, 문구만 고친 항목은 같은 자리 결과를 유지 */
+const flatItems = (type, items) => itemKeys(type, items || (type === 'maint' ? {} : [])).map(k => [k, type === 'maint' ? (items[k.split('-')[0]] || [])[+k.split('-')[1]] : items[+k]]);
+function remapSheet(type, sh, items){
+  if (JSON.stringify(sh.items) === JSON.stringify(items)) return null;
+  const O = flatItems(type, sh.items), N = flatItems(type, items), oldK = new Set(O.map(x => x[0])), map = {}, used = new Set();
+  O.forEach(([k, t]) => { const m = N.find(([nk, nt]) => nt === t && !used.has(nk)); if (m){ map[k] = m[0]; used.add(m[0]); } });
+  O.forEach(([k]) => { if (map[k] == null && !used.has(k) && N.some(([nk]) => nk === k)){ map[k] = k; used.add(k); } });
+  const mv = src => { const o = {}; for (const k in (src || {})){ if (map[k] != null) o[map[k]] = src[k]; else if (!oldK.has(k)) o[k] = src[k]; } return o; };
+  return { ...sh, items: clone(items), res: mv(sh.res), note: mv(sh.note), ...(sh.media ? { media: mv(sh.media) } : {}) };
+}
+function syncInspItems(only){
+  let n = 0;
+  for (const [id, i] of Object.entries(S.inspections)){
+    if ((only ? id !== only : i.status === '완료') || !i.eqIds || !i.sheets) continue;
+    const sheets = { ...i.sheets }; let ch = false;
+    for (const eq of i.eqIds){ const sh = sheets[eq]; if (!sh) continue; const r = remapSheet(i.type, sh, tplItems(i.type, eq)); if (r){ sheets[eq] = r; ch = true; } }
+    if (ch){ S.inspections[id] = { ...i, sheets }; persist('inspections', id, 600); n++; }
+  }
+  return n;
+}
+/* 완료된 점검은 자동으로 바꾸지 않고, 보고서 화면에서 맞출지 묻기 위해 차이만 확인 */
+function inspStale(i){
+  const tg = ownerTargets(S.owners[i.ownerId] || {}), cur = (i.eqIds || []).map(Number);
+  const eqDiff = tg.length && (tg.some(eq => !cur.includes(eq)) || cur.some(eq => !tg.includes(eq)));
+  const itDiff = cur.some(eq => (i.sheets || {})[eq] && JSON.stringify(i.sheets[eq].items) !== JSON.stringify(tplItems(i.type, eq)));
+  return eqDiff || itDiff;
+}
+function tplSync(){ const n = syncInspItems(); if (n) toast(`진행 중인 점검 ${n}건의 점검표 항목에도 반영했습니다`); }
+function syncNote(n){ if (n) toast(`진행 중인 점검 ${n}건의 설비점검표에도 반영했습니다`); }
 function nextDue(o){
   if (!o.completed) return null;
   const c = new Date(o.completed), now = new Date();
@@ -894,7 +949,7 @@ function myAcl(){
 }
 function catLv(c){ const m = myAcl(); if (m.all) return 'edit'; if (c === 'admin') return 'none'; return m.perms[c] || 'none'; }
 const pageLv = (pg = UI.page) => catLv(pageCat(pg));
-const RO_SAFE = new Set('guidetog pctype invgo navback navfwd navtog menu itab ieq lawtab lawgo lawjump lawfind lawsave lawppt lawart rpick rsave rppt rxlsx rgoto qfilter qthtml qtppt ctrhtml ctrppt ctrtab ctropen qtopen vtab otab schtab schmon schday schev lb lbclose apthtml aptppt aptkind pchtml pceq refguide refq reftab formeq fopen fzip mopen steq stowner costowner bkexport partexp mineonly medev aiclose newclose dgclose rsclose pickok logf logq alopen alertack pltog plyear plexp plcancel plflt plfltog sdhtml sdppt sdopen pldoc pldochtml pldocppt pldocclose plapv dxyear dxtbl qrscan qrowner qrlabels obflush'.split(' '));
+const RO_SAFE = new Set('guidetog pctype invgo navback navfwd navtog menu itab ieq lawtab lawgo lawjump lawfind lawsave lawppt lawart rpick rsave rppt rxlsx rgoto qfilter qthtml qtppt ctrhtml ctrppt ctrtab ctropen qtopen vtab otab schtab schmon schday schev lb lbclose fnative apthtml aptppt aptkind pchtml pceq refguide refq reftab formeq fopen fzip mopen steq stowner costowner bkexport partexp mineonly medev aiclose newclose dgclose rsclose pickok logf logq alopen alertack pltog plyear plexp plcancel plflt plfltog sdhtml sdppt sdopen pldoc pldochtml pldocppt pldocclose plapv dxyear dxtbl qrscan qrowner qrlabels obflush'.split(' '));
 function roApply(main){
   main.querySelectorAll('input,select,textarea,button[data-act],label[for]').forEach(el => { const a = el.dataset.act;
     if (el.tagName === 'LABEL'){ const f = document.getElementById(el.getAttribute('for')); if (f && f.type === 'file' && f.id !== 'partfile'){ el.classList.add('rooff'); el.removeAttribute('for'); } return; }
@@ -932,12 +987,14 @@ function aclClaim(){
   put('templates', 'acl', A); toast(`초대 예정자 ${hits.length}명이 접속해 미리 정한 권한을 적용했습니다`);
 }
 function nameOf(uid){ if (uid in NAMES) return NAMES[uid]; if (USERCAP && !NAMEP.has(uid)){ NAMEP.add(uid); USERCAP.profiles([uid]).then(r => { const q = r[uid] || {}; NAMES[uid] = { name: q.name || '', av: q.avatarUrl || '', guest: !!q.guest, me: !!q.isMe }; render(); }).catch(() => {}); } return null; }
+const MIRAE_LOGO = 'data:image/jpeg;base64,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';
 function renderSide(){
   const a = activeTop();
   const link = (k, t, cls) => `<a data-go="${k}" class="${a === k ? 'on' : ''}">${esc(t)}</a>`;
   const bv = vendors().find(v => /미래\s*BM/i.test(v.name || '')) || vendors().find(v => getPhoto(`logo__vendors__${v.id}`));
-  const blogo = bv ? getPhoto(`logo__vendors__${bv.id}`) : null;
-  let h = `${blogo ? `<a class="brandlogo" data-go="dashboard" role="link" tabindex="0" title="대시보드로 이동" aria-label="${esc(bv.name)} 로고 — 대시보드로 이동"><img src="${blogo}" alt="${esc(bv.name)} 로고"></a>` : ''}<div class="brand"><div class="bwrap" data-go="dashboard" role="link" tabindex="0" title="대시보드로 이동"><svg class="bmark" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="tlg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1f5a8c"/><stop offset="1" stop-color="#0f2e4a"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#tlg)"/><g transform="translate(1.5 0.5)"><rect x="10" y="9" width="27" height="37" rx="3.5" fill="none" stroke="#fff" stroke-width="2.8"/><path d="M10 19.5H37M10 30H37" stroke="#fff" stroke-width="2" opacity=".5"/><path d="M19 14.5H31M19 25H31M19 35.5H24" stroke="#fff" stroke-width="2.2" stroke-linecap="round" opacity=".75"/><circle cx="14.8" cy="14.5" r="1.7" fill="#3fb6e8"/><circle cx="14.8" cy="25" r="1.7" fill="#3fb6e8"/><circle cx="14.8" cy="35.5" r="1.7" fill="#3fb6e8"/><circle cx="38" cy="38" r="12.5" fill="#163d61" stroke="#fff" stroke-width="3.4"/><path d="M47 47 L53.5 53.5" stroke="#fff" stroke-width="5.4" stroke-linecap="round"/><path d="M32 38.5 L36.3 42.8 L44.3 34" fill="none" stroke="#3fb6e8" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></g></svg><div><span class="bname">ICT <b>INFRA CHECK</b></span><small>정보통신설비 유지보수·성능점검</small></div></div><button class="qrbtn" data-act="qrscan" title="설비 QR 스캔" aria-label="설비 QR 스캔"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8V4.5A1.5 1.5 0 0 1 4.5 3H8M16 3h3.5A1.5 1.5 0 0 1 21 4.5V8M21 16v3.5a1.5 1.5 0 0 1-1.5 1.5H16M8 21H4.5A1.5 1.5 0 0 1 3 19.5V16"/><rect x="7" y="7" width="4" height="4"/><rect x="13" y="13" width="4" height="4"/><path d="M13 7h4v4M7 13v4h4"/></svg><span>QR</span></button><button class="menu-toggle" data-act="menu" aria-label="메뉴 열기">메뉴</button></div><button class="qrside" data-act="qrscan"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8V4.5A1.5 1.5 0 0 1 4.5 3H8M16 3h3.5A1.5 1.5 0 0 1 21 4.5V8M21 16v3.5a1.5 1.5 0 0 1-1.5 1.5H16M8 21H4.5A1.5 1.5 0 0 1 3 19.5V16"/><path d="M7 12h10"/></svg>설비 QR 스캔</button><ul class="nav">`;
+  /* 대행업체 로고를 올리지 않은 기기(설치형 앱, 파일로 연 화면 등)에서도 미래BM 로고를 기본으로 표시 */
+  const blogo = (bv ? getPhoto(`logo__vendors__${bv.id}`) : null) || MIRAE_LOGO, bname = bv && bv.name || '미래BM';
+  let h = `${blogo ? `<a class="brandlogo" data-go="dashboard" role="link" tabindex="0" title="대시보드로 이동" aria-label="${esc(bname)} 로고 — 대시보드로 이동"><img src="${blogo}" alt="${esc(bname)} 로고"></a>` : ''}<div class="brand"><div class="bwrap" data-go="dashboard" role="link" tabindex="0" title="대시보드로 이동"><svg class="bmark" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="tlg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1f5a8c"/><stop offset="1" stop-color="#0f2e4a"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#tlg)"/><g transform="translate(1.5 0.5)"><rect x="10" y="9" width="27" height="37" rx="3.5" fill="none" stroke="#fff" stroke-width="2.8"/><path d="M10 19.5H37M10 30H37" stroke="#fff" stroke-width="2" opacity=".5"/><path d="M19 14.5H31M19 25H31M19 35.5H24" stroke="#fff" stroke-width="2.2" stroke-linecap="round" opacity=".75"/><circle cx="14.8" cy="14.5" r="1.7" fill="#3fb6e8"/><circle cx="14.8" cy="25" r="1.7" fill="#3fb6e8"/><circle cx="14.8" cy="35.5" r="1.7" fill="#3fb6e8"/><circle cx="38" cy="38" r="12.5" fill="#163d61" stroke="#fff" stroke-width="3.4"/><path d="M47 47 L53.5 53.5" stroke="#fff" stroke-width="5.4" stroke-linecap="round"/><path d="M32 38.5 L36.3 42.8 L44.3 34" fill="none" stroke="#3fb6e8" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></g></svg><div><span class="bname">ICT <b>INFRA CHECK</b></span><small>정보통신설비 유지보수·성능점검</small></div></div><button class="qrbtn" data-act="qrscan" title="설비 QR 스캔" aria-label="설비 QR 스캔"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8V4.5A1.5 1.5 0 0 1 4.5 3H8M16 3h3.5A1.5 1.5 0 0 1 21 4.5V8M21 16v3.5a1.5 1.5 0 0 1-1.5 1.5H16M8 21H4.5A1.5 1.5 0 0 1 3 19.5V16"/><rect x="7" y="7" width="4" height="4"/><rect x="13" y="13" width="4" height="4"/><path d="M13 7h4v4M7 13v4h4"/></svg><span>QR</span></button><button class="menu-toggle" data-act="menu" aria-label="메뉴 열기">메뉴</button></div><button class="qrside" data-act="qrscan"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8V4.5A1.5 1.5 0 0 1 4.5 3H8M16 3h3.5A1.5 1.5 0 0 1 21 4.5V8M21 16v3.5a1.5 1.5 0 0 1-1.5 1.5H16M8 21H4.5A1.5 1.5 0 0 1 3 19.5V16"/><path d="M7 12h10"/></svg>설비 QR 스캔</button><ul class="nav">`;
   UI.navOpen = UI.navOpen || {};
   const kidsOf = n => n.sub ? n.sub : n.children ? n.children : null;
   const has = (n, k) => n.k === k && !kidsOf(n) || (kidsOf(n) || []).some(c => has(c, k));
@@ -2268,7 +2325,8 @@ function folderPanel(i){
   else items = T.flatMap(t => t.items);
   const files = items.flatMap(x => [...x.p.map((p, n) => ({ kind: 'p', id: p.id, name: `${x.f.itF}_${pad2(n + 1)}.jpg`, folder: x.f })), ...x.a.map((a, n) => ({ kind: 'a', id: a.id, name: `${x.f.itF}_음성${pad2(n + 1)}`, dur: a.dur, folder: x.f }))]);
   return `<div class="panel"><div class="panel-h"><div><h3>사진 폴더</h3><span class="small muted">점검항목마다 폴더가 자동으로 만들어지고, 찍은 사진·음성이 그 폴더에 번호 순서로 정리됩니다</span></div>
-    <div class="row"><span class="chip sky">사진 ${tp} · 음성 ${ta}</span><label class="chk small"><input type="checkbox" data-act="fempty" ${UI.fshowEmpty !== false ? 'checked' : ''}> 빈 폴더도 보기</label>${selEq ? `<button class="btn sm" data-act="fzip" data-scope="sel">이 폴더 ZIP 저장</button>` : ''}<button class="btn sm pri" data-act="fzip" data-scope="all">전체 폴더 ZIP 저장</button></div></div>
+    <div class="row"><span class="chip sky">사진 ${tp} · 음성 ${ta}</span><label class="chk small"><input type="checkbox" data-act="fempty" ${UI.fshowEmpty !== false ? 'checked' : ''}> 빈 폴더도 보기</label>${selEq ? `<button class="btn sm" data-act="fzip" data-scope="sel">이 폴더 ZIP 저장</button>` : ''}${isNative() ? `<button class="btn sm" data-act="fnative">휴대폰 폴더에 모두 저장</button>` : ''}<button class="btn sm pri" data-act="fzip" data-scope="all">전체 폴더 ZIP 저장</button></div></div>
+  <p class="small muted" style="margin:0 0 10px">${isNative() ? `찍은 사진은 휴대폰 <b>문서 › ICT_InfraCheck › ${esc(photoRoot(i)[0])} › ${esc(photoRoot(i)[1])} › 설비 › 점검항목</b> 폴더에 자동으로 저장됩니다. 다른 기술자가 찍은 사진도 이 점검을 열면 받아 둡니다.` : `웹 화면에서는 브라우저 보안 때문에 휴대폰 폴더에 바로 저장할 수 없습니다. <b>ZIP 저장</b>을 누르면 관리주체 › 점검 › 설비 › 점검항목 폴더 그대로 담기니, 휴대폰에서 압축을 풀면 됩니다. 촬영 즉시 폴더 자동 저장은 설치형 앱에서 됩니다.`}</p>
   <div class="ed"><div class="eqlist"><button class="eqi ${!selEq ? 'on' : ''}" data-act="fsel" data-f=""><span class="n">🗂 ${esc(inspTitle(i))}</span><span class="num small muted">${tp}</span></button>${tree}</div>
   <div class="sheet"><div class="sheet-h"><div class="small muted">📂 ${crumb}</div></div><div class="sheet-b" style="border-top:0">
   ${files.length ? `<div class="thumbs">${files.map(f => f.kind === 'p' ? `<div style="display:grid;gap:3px;width:132px"><button class="thumb" style="width:132px;height:100px" data-act="lb" data-id="${f.id}">${getPhoto(f.id) ? `<img src="${getPhoto(f.id)}" alt="">` : ''}</button><span class="small" style="overflow-wrap:anywhere;line-height:1.3">${esc(f.name)}</span></div>` : `<div style="display:grid;gap:3px;width:132px"><div class="thumb" style="width:132px;height:100px;display:grid;place-items:center;cursor:default">${ICON.mic}</div><span class="small" style="overflow-wrap:anywhere;line-height:1.3">${esc(f.name)}${f.dur ? ' · ' + fmtSec(f.dur) : ''}</span></div>`).join('')}</div>` : '<p class="muted small">이 폴더에는 아직 사진이 없습니다. 점검표 항목의 카메라 아이콘으로 촬영하면 여기에 쌓입니다.</p>'}
@@ -2284,7 +2342,7 @@ async function folderZip(i, id, scope){
     const allSets = sets; sets = sets.filter(o => o.x.p.length || o.x.a.length);
     if (!sets.length){ busy(null); toast('내려받을 사진이 없습니다'); return; }
     sets.forEach(o => o.x.p.forEach(p => getPhoto(p.id))); await waitPhotos();
-    const o = S.owners[i.ownerId] || {}, root = fsafe(`${o.name || ''}_${i.term || ''}_${i.type === 'perf' ? '성능점검' : '유지보수관리'}`).replace(/ /g, '_');
+    const [ow, ins] = photoRoot(i), root = `${ow}/${ins}`;
     const zip = new JSZip(); let n = 0, total = sets.reduce((a, b) => a + b.x.p.length + b.x.a.length, 0);
     allSets.forEach(({ x }) => zip.folder(`${root}/${x.f.eqF}/${x.f.itF}`));
     for (const { x } of sets){
@@ -2294,7 +2352,7 @@ async function folderZip(i, id, scope){
     }
     busy('ZIP 파일 만드는 중…');
     const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/zip' });
-    busy(null); await saveFile(`${root}${scope === 'sel' && selEq ? '_' + fsafe(EQM[selEq].name).replace(/ /g, '_') : ''}_사진폴더.zip`, blob);
+    busy(null); await saveFile(`${ow.replace(/ /g, '_')}_${ins}${scope === 'sel' && selEq ? '_' + fsafe(EQM[selEq].name).replace(/ /g, '_') : ''}_사진폴더.zip`, blob);
   } catch(e){ busy(null); toast(e && e.message === 'script' ? '압축 도구를 불러오지 못했습니다' : '사진 폴더를 만들지 못했습니다'); }
 }
 function ledgerPanel(i){
@@ -2391,6 +2449,10 @@ function inspPage(){
   const i = S.inspections[UI.id];
   if (!i) return emptyBox('점검을 찾을 수 없습니다', '삭제되었을 수 있습니다.', `<button class="btn" data-go="dashboard">대시보드로</button>`);
   if (i.id !== UI.id) i.id = UI.id;
+  if (!inspPage.sy) inspPage.sy = {};
+  if (!inspPage.sy[UI.id] && i.status !== '완료' && pageLv() === 'edit'){ inspPage.sy[UI.id] = 1; const a = syncInspTargets(i.ownerId), b = syncInspItems(UI.id); if (a || b){ setTimeout(() => toast(a ? '관리주체에서 체크한 대상설비에 맞춰 점검표 설비를 맞췄습니다' : '바뀐 점검표 항목을 반영했습니다'), 0); return inspPage(); } }
+  if (isNative() && !inspPage.ns) inspPage.ns = {};
+  if (isNative() && !inspPage.ns[UI.id]){ inspPage.ns[UI.id] = 1; const iid = UI.id; setTimeout(() => nativeSyncInsp(S.inspections[iid], iid).then(n => { if (n) toast(`휴대폰 폴더에 사진 ${n}장을 저장했습니다`); }).catch(() => {}), 1500); }
   const isP = i.type === 'perf', st = inspStat(i);
   let eq = i.eqIds.includes(+UI.eq) ? +UI.eq : i.eqIds[0];
   const o = S.owners[i.ownerId] || {}, v = S.vendors[i.vendorId];
@@ -3990,8 +4052,11 @@ function reportPage(type){
   h += `<div class="tabs" style="margin-bottom:14px"><button class="${isPT ? '' : 'on'}" data-go="report-maint">유지보수·관리 보고서 <span class="num">${insps().filter(x => x.type === 'maint').length}</span></button><button class="${isPT ? 'on' : ''}" data-go="report-perf">성능점검 보고서 <span class="num">${insps().filter(x => x.type === 'perf').length}</span></button></div>`;
   if (!list.length) return h + emptyBox(`${isPT ? '성능점검' : '유지보수·관리'} 보고서로 만들 점검이 없습니다`, `${isPT ? '성능점검' : '유지보수·관리 점검'}을 먼저 등록하세요.`, `<button class="btn pri" data-go="${type}">${isPT ? '성능점검' : '유지보수·관리'}으로</button>`);
   const id = UI.reportId && S.inspections[UI.reportId] && S.inspections[UI.reportId].type === type ? UI.reportId : list[0].id; UI.reportId = id;
+  if (!reportPage.sy) reportPage.sy = {};
+  if (!reportPage.sy[id] && S.inspections[id].status !== '완료' && pageLv() === 'edit'){ reportPage.sy[id] = 1; if (syncInspTargets(S.inspections[id].ownerId) + syncInspItems(id)) setTimeout(() => toast('현재 대상설비·점검표 항목 기준으로 보고서를 다시 만들었습니다'), 0); }
   const i = S.inspections[id];
   const rd = reportReadiness(i);
+  if (i.status === '완료' && pageLv() === 'edit' && inspStale(i)) h += `<div class="panel" style="margin-bottom:14px;border-left:3px solid var(--warn,#c80)"><div class="spread"><span class="small">이 점검은 완료 처리된 뒤 관리주체 대상설비나 점검표 항목이 바뀌어, 보고서에 예전 항목이 나옵니다.</span><button class="btn sm pri" data-act="rsync">현재 항목으로 맞추기</button></div></div>`;
   h += `<div class="panel" style="margin-bottom:18px"><div class="spread"><div class="row"><span class="muted small">점검 선택</span>${sel('rpick', list.map(x => [x.id, `${fmtDate(x.date)} · ${inspTitle(x)}`]), id, 'data-act="rpick" style="width:auto;max-width:100%"')}</div><div class="row"><button class="btn" data-open="${id}" data-opentab="rinfo">보고서 정보 편집</button><span class="small muted">내려받기</span><button class="btn" data-act="rsave">HTML</button><button class="btn pri" data-act="rppt">PPT (.pptx)</button><button class="btn pri" data-act="rxlsx">엑셀 (.xlsx)</button></div></div>
   <div class="row small" style="margin-top:10px;gap:6px"><span class="muted">보고서 자료</span>${rd.map(([t, ok, w]) => `<button class="chip ${ok ? 'ok' : 'warn'}" style="border:0;cursor:pointer" data-act="rgoto" data-w="${w}">${ok ? '✓' : '＋'} ${t}</button>`).join('')}</div>
   ${(() => { const o = S.owners[i.ownerId] || {}, v = S.vendors[i.vendorId]; const ol = getPhoto(`logo__owners__${i.ownerId}`), vl = v ? getPhoto(`logo__vendors__${i.vendorId}`) : null;
@@ -4917,8 +4982,8 @@ document.addEventListener('click', async ev => {
     case 'deltech': arm(d.key, () => { const vid = UI.vendorSel && S.vendors[UI.vendorSel] ? UI.vendorSel : vendors()[0].id; const v = S.vendors[vid]; v.techs = (v.techs || []).filter(t => t.id !== d.key.slice(1)); put('vendors', vid, v); }); break;
     case 'delrepair': arm(d.key, () => del('repairs', d.key.slice(1))); break;
     case 'delinsp': arm(d.key, () => { const id = d.key.slice(1); const t = S.inspections[id].type; S.inspections[id].eqIds.forEach(eq => { const sh = S.inspections[id].sheets[eq]; if (sh.hasPhoto || PH[`insp__${id}__${eq}`]) setPhoto(`insp__${id}__${eq}`, null); Object.values(sh.media || {}).forEach(m => { m.p.forEach(p => setPhoto(p.id, null)); m.a.forEach(x => dropAudio(x.id)); }); }); del('inspections', id); go(t); toast('점검을 삭제했습니다'); }); break;
-    case 'eqtoggle': { const id = UI.ownerSel && S.owners[UI.ownerSel] ? UI.ownerSel : owners()[0].id; const ow = S.owners[id]; ow.equip = ow.equip || {}; const e = EQM[d.eq]; const cur = ow.equip[d.eq] || { qty: e.unit === '세대' ? (ow.households || '') : 1 }; cur.on = a.checked; ow.equip[d.eq] = cur; put('owners', id, ow, 400); break; }
-    case 'eqall': { const id = UI.ownerSel && S.owners[UI.ownerSel] ? UI.ownerSel : owners()[0].id; const ow = S.owners[id]; ow.equip = ow.equip || {}; EQ.forEach(e => { const cur = ow.equip[e.id] || { qty: e.unit === '세대' ? (ow.households || '') : 1 }; cur.on = d.on === '1'; ow.equip[e.id] = cur; }); put('owners', id, ow); break; }
+    case 'eqtoggle': { const id = UI.ownerSel && S.owners[UI.ownerSel] ? UI.ownerSel : owners()[0].id; const ow = S.owners[id]; ow.equip = ow.equip || {}; const e = EQM[d.eq]; const cur = ow.equip[d.eq] || { qty: e.unit === '세대' ? (ow.households || '') : 1 }; cur.on = a.checked; ow.equip[d.eq] = cur; put('owners', id, ow, 400); clearTimeout(syncNote.t); syncNote.t = setTimeout(() => { syncNote(syncInspTargets(id)); render(); }, 900); break; }
+    case 'eqall': { const id = UI.ownerSel && S.owners[UI.ownerSel] ? UI.ownerSel : owners()[0].id; const ow = S.owners[id]; ow.equip = ow.equip || {}; EQ.forEach(e => { const cur = ow.equip[e.id] || { qty: e.unit === '세대' ? (ow.households || '') : 1 }; cur.on = d.on === '1'; ow.equip[e.id] = cur; }); put('owners', id, ow); syncNote(syncInspTargets(id)); render(); break; }
     case 'assetadd': { const id = UI.ownerSel && S.owners[UI.ownerSel] ? UI.ownerSel : owners()[0].id; const ow = S.owners[id]; ow.assets = ow.assets || []; ow.assets.push({ eq: ownerTargets(ow)[0] || 1, name:'', model:'', qty:1, maker:'', loc:'', year:'' }); put('owners', id, ow); break; }
     case 'assetdel': { const id = UI.ownerSel && S.owners[UI.ownerSel] ? UI.ownerSel : owners()[0].id; const ow = S.owners[id]; ow.assets.splice(+d.i, 1); put('owners', id, ow); break; }
     case 'formeq': UI.formEq = +d.eq; render(); break;
@@ -5016,16 +5081,16 @@ document.addEventListener('click', async ev => {
       put('templates', 'contract_tpl2', { arts: A }); break; }
     case 'aptppt': aptExport('ppt'); break;
     case 'aptfill': { const o = S.owners[UI.aptOwner]; if (!o) break; const A = aptData(o, 'chg'); A.rows = A.rows || {}; ['name','ceo','bizNo','addr'].forEach(k => { const r = A.rows[k] = A.rows[k] || ['', '', '']; if (!r[1]) r[1] = o[k] || ''; }); put('owners', UI.aptOwner, o); toast("관리주체 현재 정보를 '변경 후'에 넣었습니다"); break; }
-    case 'tplreset': del('templates', tplKey(d.type, +d.eq)); toast(regForm(d.type) ? '등록 서식 내용으로 되돌렸습니다' : '고시 기본값으로 되돌렸습니다'); break;
+    case 'tplreset': del('templates', tplKey(d.type, +d.eq)); tplSync(); render(); toast(regForm(d.type) ? '등록 서식 내용으로 되돌렸습니다' : '고시 기본값으로 되돌렸습니다'); break;
     case 'formapply': { const P = UI.formPend; if (!P) break; const f = P.f; Object.keys(S.templates).filter(k => k.startsWith(P.type + '_')).forEach(k => del('templates', k));
-      put('templates', 'form__' + P.type, { code: f.code, items: f.items, spans: f.spans, sub: f.sub, rows: f.rows, how: f.how, found: f.found, fileName: P.fileName, at: today() }); UI.formPend = null; toast(`${f.code} 서식을 등록했습니다 (설비 ${f.found}종)`); break; }
+      put('templates', 'form__' + P.type, { code: f.code, items: f.items, spans: f.spans, sub: f.sub, rows: f.rows, how: f.how, found: f.found, fileName: P.fileName, at: today() }); UI.formPend = null; toast(`${f.code} 서식을 등록했습니다 (설비 ${f.found}종)`); setTimeout(() => { tplSync(); render(); }, 1200); break; }
     case 'formcancel': UI.formPend = null; render(); break;
-    case 'formunreg': arm('fu' + d.type, () => { del('templates', 'form__' + d.type); toast('고시 기본 서식으로 되돌렸습니다'); }); break;
+    case 'formunreg': arm('fu' + d.type, () => { del('templates', 'form__' + d.type); tplSync(); render(); toast('고시 기본 서식으로 되돌렸습니다'); }); break;
     case 'tpldel': case 'tpladd': {
       const items = tplItems(d.type, +d.eq);
       if (act === 'tpladd'){ if (d.type === 'maint') items[d.sec].push('새 점검내용'); else items.push('새 점검내용'); }
       else { if (d.type === 'maint'){ const [s, n] = d.path.split('-'); items[s].splice(+n, 1); } else items.splice(+d.path, 1); }
-      put('templates', tplKey(d.type, +d.eq), { items }); break; }
+      put('templates', tplKey(d.type, +d.eq), { items }); tplSync(); render(); break; }
     case 'newinsp': UI.newOpen = true; UI.ndraft = {}; render(); break;
     case 'newclose': UI.newOpen = false; render(); break;
     case 'itab': UI.tab = d.k; render(); break;
@@ -5051,6 +5116,7 @@ document.addEventListener('click', async ev => {
     case 'ieq': UI.eq = +d.eq; if (d.tab) UI.tab = d.tab; render(); document.querySelector('.sheet')?.scrollIntoView({ block:'nearest' }); break;
     case 'res': { const sh = I.sheets[d.eq]; sh.res[d.k] = sh.res[d.k] === d.v ? undefined : d.v; if (!sh.res[d.k]) delete sh.res[d.k]; put('inspections', UI.id, I, 900); break; }
     case 'fillok': case 'fillna': { const sh = I.sheets[d.eq]; itemKeys(I.type, sh.items).forEach(k => { if (act === 'fillna') sh.res[k] = '-'; else if (!sh.res[k]) sh.res[k] = 'O'; }); put('inspections', UI.id, I, 400); break; }
+    case 'rsync': { const ri = S.inspections[UI.reportId]; if (!ri) break; const a = syncInspTargets(ri.ownerId, UI.reportId), b = syncInspItems(UI.reportId); toast(a || b ? '현재 대상설비·점검표 항목으로 맞췄습니다. 새 항목은 점검 입력에서 채워 주세요' : '바꿀 내용이 없습니다'); render(); break; }
     case 'togglestatus': I.status = I.status === '완료' ? '진행중' : '완료'; if (I.status === '완료'){ const st = inspStat(I); if (st.done < st.total) toast(`미입력 항목 ${st.total - st.done}개가 남아 있습니다`); } put('inspections', UI.id, I); break;
     case 'rev': { const sh = I.sheets[d.eq]; sh[d.f] = sh[d.f] === d.v ? '' : d.v; put('inspections', UI.id, I, 900); break; }
     case 'revall': I.eqIds.forEach(eq => { const sh = I.sheets[eq]; if (!sh.work) sh.work = 'O'; if (!sh.match) sh.match = 'O'; }); put('inspections', UI.id, I, 400); break;
@@ -5084,6 +5150,7 @@ document.addEventListener('click', async ev => {
     case 'fsel': UI.fsel = d.f; render(); break;
     case 'fempty': UI.fshowEmpty = a.checked; render(); break;
     case 'fopen': UI.fsel = d.eq + '|' + d.k; UI.tab = 'folders'; render(); window.scrollTo(0, 0); break;
+    case 'fnative': { if (UI.exporting) break; UI.exporting = true; busy('휴대폰 폴더에 저장 중…'); try { const n = await nativeSyncInsp(I, UI.id); busy(null); toast(n ? `휴대폰 문서/ICT_InfraCheck 폴더에 사진 ${n}장을 저장했습니다` : '이미 모두 저장되어 있습니다'); } catch(e){ busy(null); toast('휴대폰 폴더에 저장하지 못했습니다. 앱의 저장 권한을 확인해 주세요'); } finally { UI.exporting = false; } break; }
     case 'fzip': if (UI.exporting) break; UI.exporting = true; try { await folderZip(I, UI.id, d.scope); } finally { UI.exporting = false; } break;
     case 'stdapply': { const sh = I.sheets[d.eq]; const st = stdFor(I.type, +d.eq, itemText(I, +d.eq, d.k)); const line = `[${itemText(I, +d.eq, d.k)}] ${st.act}`; if (I.type === 'perf'){ if (!(sh.act || '').includes(line)) sh.act = (sh.act ? sh.act + '\n' : '') + line; } else { sh.note[d.k] = (sh.note[d.k] ? sh.note[d.k] + ' / ' : '') + '조치: ' + st.act; } put('inspections', UI.id, I); toast(I.type === 'perf' ? '조치사항에 권고 조치를 넣었습니다' : '비고에 권고 조치를 넣었습니다'); break; }
     case 'stdadd': { const R = clone(stdRules()); R.push({ id: 'u' + uid(), kw: '새 키워드', refs: [{ doc: '기준명', art: '', req: '요구 내용' }], act: '' }); put('templates', 'stdlib', { rules: R }); break; }
@@ -5231,7 +5298,7 @@ document.addEventListener('input', ev => {
     case 'eqqty': { const id = UI.ownerSel && S.owners[UI.ownerSel] ? UI.ownerSel : owners()[0].id; const ow = S.owners[id]; ow.equip[d.eq] = { ...(ow.equip[d.eq] || {}), qty: t.value }; touch('owners', id); break; }
     case 'asset': if (t.tagName === 'INPUT'){ const id = UI.ownerSel && S.owners[UI.ownerSel] ? UI.ownerSel : owners()[0].id; S.owners[id].assets[+d.i][d.f] = t.value; touch('owners', id); } break;
     case 'tech': if (t.tagName === 'INPUT'){ const vid = UI.vendorSel && S.vendors[UI.vendorSel] ? UI.vendorSel : vendors()[0].id; const tc = S.vendors[vid].techs.find(x => x.id === d.t); tc[d.f] = t.value; touch('vendors', vid); } break;
-    case 'tpledit': { const k = tplKey(d.type, +d.eq); const items = tplItems(d.type, +d.eq); if (d.type === 'maint'){ const [s, n] = d.path.split('-'); items[s][+n] = t.value; } else items[+d.path] = t.value; S.templates[k] = { items }; touch('templates', k, 800); break; }
+    case 'tpledit': { const k = tplKey(d.type, +d.eq); const items = tplItems(d.type, +d.eq); if (d.type === 'maint'){ const [s, n] = d.path.split('-'); items[s][+n] = t.value; } else items[+d.path] = t.value; S.templates[k] = { items }; touch('templates', k, 800); clearTimeout(tplSync.t); tplSync.t = setTimeout(tplSync, 900); break; }
     case 'cost': { const C = UI.cost, f = d.f; if (f.startsWith('q:')) { C.qty[f.slice(2)].q = t.value; C.split = null; } else if (f.startsWith('price:')) C.price[f.slice(6)] = t.value; else if (f.startsWith('split:')){ const g = gradeByArea(C.area); if (!C.split){ const cur = {}; document.querySelectorAll('[data-f^="split:"]').forEach(el => cur[el.dataset.f.slice(6)] = el.value); C.split = cur; } C.split[f.slice(6)] = t.value; } else { C[f] = t.value; if (f === 'area' || f === 'mt' || f === 'pt') C.split = null; }
       clearTimeout(UI.ct); UI.ct = setTimeout(render, 450); break; }
     case 'contact': { const id = UI.ownerSel && S.owners[UI.ownerSel] ? UI.ownerSel : owners()[0].id; S.owners[id].contacts[+d.i][+d.f] = t.value; touch('owners', id); break; }
