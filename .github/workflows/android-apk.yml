@@ -1,1 +1,40 @@
-
+name: Android APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - name: Use fixed signing key (if present)
+        run: |
+          mkdir -p ~/.android
+          if [ -f keystore/debug.keystore ]; then cp keystore/debug.keystore ~/.android/debug.keystore; fi
+      - run: npm install
+      - run: node scripts/init.js android
+      - name: Version
+        run: |
+          sed -i "s/versionCode [0-9]*/versionCode ${{ github.run_number }}/" android/app/build.gradle
+          sed -i "s/versionName \"[^\"]*\"/versionName \"1.1.${{ github.run_number }}\"/" android/app/build.gradle
+      - run: chmod +x android/gradlew && cd android && ./gradlew assembleDebug --no-daemon
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk ICT_InfraCheck-v1.1.${{ github.run_number }}.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ICT_InfraCheck-apk
+          path: ICT_InfraCheck-v1.1.${{ github.run_number }}.apk
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: app-v1.1.${{ github.run_number }}
+          name: ICT INFRA CHECK v1.1.${{ github.run_number }}
+          files: ICT_InfraCheck-v1.1.${{ github.run_number }}.apk
+          make_latest: true
